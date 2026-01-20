@@ -11,9 +11,10 @@ import { hasUserPurchased } from '@/lib/storage';
 
 export default function ArticlePage() {
   const params = useParams();
-  const { address, isConnected } = useAccount();
+  const { address } = useAccount();
   const [hasPurchased, setHasPurchased] = useState(false);
   const [showFullContent, setShowFullContent] = useState(false);
+  const [paidContent, setPaidContent] = useState<string | null>(null);
 
   const article = getArticleById(params.id as string);
 
@@ -38,10 +39,15 @@ export default function ArticlePage() {
     );
   }
 
-  const handlePaymentSuccess = () => {
+  // Handle successful x402 payment - receives content from the API
+  const handlePaymentSuccess = (content: string) => {
     setHasPurchased(true);
     setShowFullContent(true);
+    setPaidContent(content);
   };
+
+  // Use paid content if available, otherwise use article content
+  const displayContent = paidContent || article.content;
 
   return (
     <article className="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
@@ -107,7 +113,7 @@ export default function ArticlePage() {
         {showFullContent ? (
           // Full article content
           <div className="article-content">
-            {article.content.split('\n\n').map((paragraph, index) => {
+            {displayContent.split('\n\n').map((paragraph, index) => {
               if (paragraph.startsWith('## ')) {
                 return (
                   <h2 key={index}>{paragraph.replace('## ', '')}</h2>

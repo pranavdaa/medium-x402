@@ -1,117 +1,82 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
-import { useAccount, useWriteContract, useWaitForTransactionReceipt, usePublicClient } from 'wagmi';
-import { parseUnits } from 'viem';
+import { useState } from 'react';
+import { useAccount, useWalletClient } from 'wagmi';
 import { ConnectKitButton } from 'connectkit';
-import { USDC_ADDRESS, PLATFORM_WALLET, USDC_DECIMALS } from '@/lib/wagmi';
+import { wrapFetchWithPayment } from 'x402-fetch';
 import { recordPurchase } from '@/lib/storage';
-
-// ERC20 ABI for transfer
-const erc20Abi = [
-  {
-    name: 'transfer',
-    type: 'function',
-    inputs: [
-      { name: 'to', type: 'address' },
-      { name: 'amount', type: 'uint256' },
-    ],
-    outputs: [{ name: '', type: 'bool' }],
-  },
-] as const;
 
 interface PaywallProps {
   articleId: string;
   price: string;
-  onPaymentSuccess: () => void;
+  onPaymentSuccess: (content: string) => void;
 }
 
 export function Paywall({ articleId, price, onPaymentSuccess }: PaywallProps) {
   const { address, isConnected } = useAccount();
+  const { data: walletClient } = useWalletClient();
+  const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [isManualChecking, setIsManualChecking] = useState(false);
-  const hasHandledSuccess = useRef(false);
-  const publicClient = usePublicClient();
 
-  const { writeContract, data: hash, isPending, error: writeError, reset } = useWriteContract();
-
-  const { isLoading: isConfirming, isSuccess, isError: receiptError } = useWaitForTransactionReceipt({
-    hash,
-  });
-
-  // Handle successful payment with useEffect
-  useEffect(() => {
-    if (isSuccess && hash && address && !hasHandledSuccess.current) {
-      hasHandledSuccess.current = true;
-      recordPurchase({
-        articleId,
-        userAddress: address,
-        txHash: hash,
-        timestamp: new Date().toISOString(),
-        amount: price,
-      });
-      onPaymentSuccess();
+  const handlePayment = async () => {
+    if (!address || !walletClient) {
+      setError('Please connect your wallet first');
+      return;
     }
-  }, [isSuccess, hash, address, articleId, price, onPaymentSuccess]);
 
-  // Handle write errors
-  useEffect(() => {
-    if (writeError) {
-      setError(writeError.message || 'Transaction failed');
-    }
-  }, [writeError]);
-
-  // Manual verification if auto-detection fails
-  const handleManualVerify = async () => {
-    if (!hash || !address || !publicClient) return;
-
-    setIsManualChecking(true);
+    setIsLoading(true);
     setError(null);
 
     try {
-      const receipt = await publicClient.waitForTransactionReceipt({
-        hash,
-        timeout: 60_000,
+      // Wrap fetch with x402 payment capability
+      const fetchWithPayment = wrapFetchWithPayment(fetch, walletClient);
+
+      // Make request to x402-protected endpoint
+      // The x402-fetch wrapper will automatically handle:
+      // 1. Detecting 402 Payment Required response
+      // 2. Signing the payment with the wallet
+      // 3. Retrying the request with payment proof
+      const response = await fetchWithPayment(`/api/articles/${articleId}/content`, {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+        },
       });
 
-      if (receipt.status === 'success' && !hasHandledSuccess.current) {
-        hasHandledSuccess.current = true;
+      if (!response.ok) {
+        throw new Error(`Payment failed: ${response.statusText}`);
+      }
+
+      const data = await response.json();
+
+      if (data.success && data.article) {
+        // Record the purchase locally
         recordPurchase({
           articleId,
           userAddress: address,
-          txHash: hash,
+          txHash: `x402-${Date.now()}`, // x402 handles tx internally
           timestamp: new Date().toISOString(),
           amount: price,
         });
-        onPaymentSuccess();
-      } else if (receipt.status === 'reverted') {
-        setError('Transaction was reverted. Please try again.');
-        reset();
+
+        // Pass the full content to parent
+        onPaymentSuccess(data.article.content);
+      } else {
+        throw new Error('Failed to retrieve article content');
       }
     } catch (err: any) {
-      setError('Could not verify transaction. Please check the block explorer.');
+      console.error('x402 payment error:', err);
+
+      // Handle user rejection
+      if (err.message?.includes('User rejected') || err.message?.includes('denied')) {
+        setError('Transaction was rejected. Please try again.');
+      } else if (err.message?.includes('insufficient')) {
+        setError('Insufficient USDC balance. Please add funds to your wallet.');
+      } else {
+        setError(err.message || 'Payment failed. Please try again.');
+      }
     } finally {
-      setIsManualChecking(false);
-    }
-  };
-
-  const handlePayment = () => {
-    if (!address) return;
-
-    setError(null);
-    hasHandledSuccess.current = false;
-
-    try {
-      const amount = parseUnits(price, USDC_DECIMALS);
-
-      writeContract({
-        address: USDC_ADDRESS as `0x${string}`,
-        abi: erc20Abi,
-        functionName: 'transfer',
-        args: [PLATFORM_WALLET as `0x${string}`, amount],
-      });
-    } catch (err: any) {
-      setError(err.message || 'Payment failed');
+      setIsLoading(false);
     }
   };
 
@@ -171,80 +136,38 @@ export function Paywall({ articleId, price, onPaymentSuccess }: PaywallProps) {
               </div>
             )}
 
-            {/* Show transaction hash if available */}
-            {hash && (isConfirming || receiptError) && (
-              <div className="bg-blue-50 text-blue-700 text-xs p-3 rounded-lg">
-                <p className="mb-1">Transaction submitted!</p>
-                <a
-                  href={`https://sepolia.basescan.org/tx/${hash}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="underline break-all"
-                >
-                  View on BaseScan
-                </a>
-              </div>
-            )}
-
-            {/* Main payment button */}
-            {!hash && (
-              <button
-                onClick={handlePayment}
-                disabled={isPending}
-                className="w-full bg-medium-green text-white font-semibold py-3 px-6 rounded-full hover:bg-green-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {isPending ? 'Confirm in wallet...' : `Pay $${price} USDC`}
-              </button>
-            )}
-
-            {/* Processing state with verify option */}
-            {hash && isConfirming && !isManualChecking && (
-              <div className="space-y-3">
-                <button
-                  disabled
-                  className="w-full bg-medium-green text-white font-semibold py-3 px-6 rounded-full opacity-50 cursor-not-allowed"
-                >
-                  Processing...
-                </button>
-                <button
-                  onClick={handleManualVerify}
-                  className="w-full border-2 border-medium-green text-medium-green font-semibold py-2 px-6 rounded-full hover:bg-medium-green/10 transition-colors text-sm"
-                >
-                  Verify Payment Manually
-                </button>
-              </div>
-            )}
-
-            {/* Manual verification in progress */}
-            {isManualChecking && (
-              <button
-                disabled
-                className="w-full bg-blue-500 text-white font-semibold py-3 px-6 rounded-full opacity-70 cursor-not-allowed"
-              >
-                Verifying transaction...
-              </button>
-            )}
-
-            {/* Retry option on error */}
-            {hash && receiptError && !isManualChecking && (
-              <div className="space-y-3">
-                <button
-                  onClick={handleManualVerify}
-                  className="w-full bg-medium-green text-white font-semibold py-3 px-6 rounded-full hover:bg-green-700 transition-colors"
-                >
-                  Verify Payment
-                </button>
-                <button
-                  onClick={() => { reset(); setError(null); }}
-                  className="w-full border-2 border-gray-300 text-gray-600 font-semibold py-2 px-6 rounded-full hover:bg-gray-50 transition-colors text-sm"
-                >
-                  Try Again
-                </button>
-              </div>
-            )}
+            <button
+              onClick={handlePayment}
+              disabled={isLoading}
+              className="w-full bg-medium-green text-white font-semibold py-3 px-6 rounded-full hover:bg-green-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {isLoading ? (
+                <span className="flex items-center justify-center gap-2">
+                  <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24">
+                    <circle
+                      className="opacity-25"
+                      cx="12"
+                      cy="12"
+                      r="10"
+                      stroke="currentColor"
+                      strokeWidth="4"
+                      fill="none"
+                    />
+                    <path
+                      className="opacity-75"
+                      fill="currentColor"
+                      d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                    />
+                  </svg>
+                  Processing payment...
+                </span>
+              ) : (
+                `Pay $${price} USDC`
+              )}
+            </button>
 
             <p className="text-xs text-gray-500">
-              Payment is processed on Base Sepolia using USDC
+              Payment is processed via x402 protocol on Base Sepolia
             </p>
           </div>
         )}
@@ -253,10 +176,15 @@ export function Paywall({ articleId, price, onPaymentSuccess }: PaywallProps) {
         <div className="mt-6 pt-4 border-t border-gray-100">
           <p className="text-xs text-gray-400 flex items-center justify-center gap-1">
             Powered by
-            <span className="font-mono bg-gray-100 px-1.5 py-0.5 rounded">
+            <a
+              href="https://x402.org"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="font-mono bg-gray-100 px-1.5 py-0.5 rounded hover:bg-gray-200 transition-colors"
+            >
               x402
-            </span>
-            protocol
+            </a>
+            protocol by Coinbase
           </p>
         </div>
       </div>

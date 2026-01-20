@@ -1,19 +1,32 @@
 # Medium x402
 
-A Medium-like article platform where users pay per article using the x402 protocol and USDC on Base Sepolia.
+A Medium-like article platform where users pay per article using the **official x402 protocol by Coinbase** and USDC on Base Sepolia.
 
 ## Features
 
 - **Wallet Authentication**: Connect with MetaMask, Coinbase Wallet, or other Web3 wallets
-- **Pay-Per-Article**: Pay $0.05 USDC to unlock paid articles (no subscriptions!)
-- **x402 Protocol**: Uses HTTP 402 Payment Required for payment flow
+- **Pay-Per-Article**: Pay $0.05 USDC to unlock paid articles using x402 protocol
+- **Official x402 SDK**: Uses `x402-next` middleware and `x402-fetch` for payments
 - **Base Sepolia**: Built on Coinbase's L2 for fast, cheap transactions
 - **Claps**: Show appreciation for articles (like Medium)
+
+## What is x402?
+
+[x402](https://x402.org) is an open payment protocol developed by Coinbase that enables instant, automatic stablecoin payments directly over HTTP. It revives the HTTP 402 "Payment Required" status code for streamlined transactions.
+
+### How x402 Works
+
+1. Client requests protected content
+2. Server responds with **402 Payment Required** + payment details in headers
+3. Client wallet signs payment automatically via `x402-fetch`
+4. Server verifies payment through the facilitator
+5. Content is delivered
 
 ## Tech Stack
 
 - **Frontend**: Next.js 14 (App Router), React, Tailwind CSS
 - **Wallet**: wagmi, viem, ConnectKit
+- **x402**: `x402-next`, `x402-fetch`, `@x402/core`, `@x402/evm`
 - **Blockchain**: Base Sepolia, USDC
 - **Storage**: localStorage (MVP)
 
@@ -30,12 +43,13 @@ A Medium-like article platform where users pay per article using the x402 protoc
 
 1. Clone the repository:
 ```bash
+git clone https://github.com/pranavdaa/medium-x402.git
 cd medium-x402
 ```
 
 2. Install dependencies:
 ```bash
-npm install
+yarn install
 ```
 
 3. Set up environment variables:
@@ -46,7 +60,7 @@ cp .env.example .env.local
 
 4. Run the development server:
 ```bash
-npm run dev
+yarn dev
 ```
 
 5. Open [http://localhost:3000](http://localhost:3000)
@@ -60,50 +74,82 @@ npm run dev
 ## Project Structure
 
 ```
-src/
-├── app/                    # Next.js App Router pages
-│   ├── page.tsx           # Landing page
-│   ├── articles/          # Article listing
-│   ├── article/[id]/      # Article detail
-│   ├── profile/           # User profile
-│   └── api/               # API routes
-├── components/            # React components
-│   ├── Header.tsx
-│   ├── ArticleCard.tsx
-│   ├── Paywall.tsx
-│   ├── ClapsButton.tsx
-│   └── Providers.tsx
-├── lib/                   # Utilities
-│   ├── wagmi.ts          # Wallet config
-│   ├── x402.ts           # x402 payment utils
-│   └── storage.ts        # localStorage utils
-├── data/                  # Mock data
-│   └── articles.ts
-└── types/                 # TypeScript types
-    └── index.ts
+├── middleware.ts              # x402 payment middleware configuration
+├── src/
+│   ├── app/
+│   │   ├── page.tsx          # Landing page
+│   │   ├── articles/         # Article listing
+│   │   ├── article/[id]/     # Article detail with paywall
+│   │   ├── profile/          # User profile
+│   │   └── api/
+│   │       └── articles/
+│   │           └── [id]/
+│   │               ├── route.ts        # Article metadata (public)
+│   │               └── content/
+│   │                   └── route.ts    # Article content (x402 protected)
+│   ├── components/
+│   │   ├── Header.tsx
+│   │   ├── ArticleCard.tsx
+│   │   ├── Paywall.tsx       # x402-fetch payment component
+│   │   ├── ClapsButton.tsx
+│   │   └── Providers.tsx
+│   ├── lib/
+│   │   ├── wagmi.ts          # Wallet config
+│   │   └── storage.ts        # localStorage utils
+│   └── data/
+│       └── articles.ts       # Sample articles
 ```
 
-## How It Works
+## x402 Integration
 
-### Payment Flow (x402)
+### Server-Side (middleware.ts)
 
-1. User opens a paid article
-2. They see a preview with a paywall
-3. Clicking "Pay" triggers a USDC transfer to the platform wallet
-4. Once confirmed, the full article content is unlocked
-5. Purchase is stored in localStorage for persistence
+```typescript
+import { paymentMiddleware } from 'x402-next';
 
-### Configuration
+export const middleware = paymentMiddleware(
+  '0xYourWalletAddress',
+  {
+    '/api/articles/1/content': {
+      price: '$0.05',
+      network: 'base-sepolia',
+      config: { description: 'Access to premium article' },
+    },
+  },
+  { url: 'https://x402.org/facilitator' }
+);
+```
 
-- **Platform Wallet**: `0xad70845D9AE0B40CB68Cc289414Ea21b1Ce18BC8`
+### Client-Side (Paywall.tsx)
+
+```typescript
+import { wrapFetchWithPayment } from 'x402-fetch';
+
+const fetchWithPayment = wrapFetchWithPayment(fetch, walletClient);
+const response = await fetchWithPayment('/api/articles/1/content');
+```
+
+## Configuration
+
+- **Seller Wallet**: `0xad70845D9AE0B40CB68Cc289414Ea21b1Ce18BC8`
 - **USDC Contract**: `0x036CbD53842c5426634e7929541eC2318f3dCF7e` (Base Sepolia)
 - **Article Price**: $0.05 USDC
+- **Network**: Base Sepolia (Chain ID: 84532)
 
 ## API Routes
 
-- `GET /api/articles` - List all articles
-- `GET /api/articles/[id]` - Get article (returns 402 if paid and no payment proof)
-- `POST /api/pay` - Verify payment and unlock article
+| Route | Method | Description | Protected |
+|-------|--------|-------------|-----------|
+| `/api/articles` | GET | List all articles | No |
+| `/api/articles/[id]` | GET | Get article metadata | No |
+| `/api/articles/[id]/content` | GET | Get full article content | **x402** |
+
+## Resources
+
+- [x402 Protocol](https://x402.org)
+- [Coinbase x402 Docs](https://docs.cdp.coinbase.com/x402/welcome)
+- [x402 GitHub](https://github.com/coinbase/x402)
+- [Base Sepolia Faucet](https://www.coinbase.com/faucets/base-ethereum-sepolia-faucet)
 
 ## License
 
